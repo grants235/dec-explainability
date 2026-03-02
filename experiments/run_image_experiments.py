@@ -319,14 +319,25 @@ def _build_attr_part_labels(data_dir: str) -> Optional[List[str]]:
     Build a list of length 312 mapping each CUB attribute index to a
     canonical part name (matching PART_TO_ATTR values in metrics.py).
 
-    Reads attributes/attributes.txt whose lines look like:
+    Reads attributes.txt whose lines look like:
         1 has_bill_shape::curved_(up_or_down)
         2 has_wing_color::blue
         ...
+
+    Tries the following paths in order:
+        data_dir/attributes.txt
+        data_dir/attributes/attributes.txt
     """
-    attrs_file = os.path.join(data_dir, "attributes", "attributes.txt")
-    if not os.path.exists(attrs_file):
-        logger.warning("attributes/attributes.txt not found; PBPA will be skipped.")
+    candidates = [
+        os.path.join(data_dir, "attributes.txt"),
+        os.path.join(data_dir, "attributes", "attributes.txt"),
+    ]
+    attrs_file = next((p for p in candidates if os.path.exists(p)), None)
+    if attrs_file is None:
+        logger.warning(
+            "attributes.txt not found (tried %s); PBPA will be skipped.",
+            " and ".join(candidates),
+        )
         return None
 
     # keyword substring -> canonical part name
