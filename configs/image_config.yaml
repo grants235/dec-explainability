@@ -1,0 +1,45 @@
+dataset:
+  name: "CUB-200-2011"
+  image_size: 448
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+model:
+  backbone: "resnet50"
+  pretrained: true
+  num_classes: 200
+
+training:
+  optimizer: "sgd"
+  lr_backbone: 0.0001
+  lr_head: 0.001
+  momentum: 0.9
+  weight_decay: 0.0001
+  epochs: 60
+  batch_size: 16
+  scheduler: "cosine"
+
+confusion_set:
+  tau: 0.02
+  k_min: 3
+  k_max: 10
+  alpha: 0.7
+  min_global_confusions: 5
+
+purposive_saliency:
+  ig_steps: 50
+  baseline: "zeros"
+  batch_competitors: true
+
+means_end:
+  probe_type: "logistic_regression"
+  cv_folds: 5
+  n_random_control_pairs: 100
+  ablation_type: "class_mean"
+
+evaluation:
+  deletion_steps: 21
+  insertion_steps: 21
+  mask_value: "dataset_mean"
+  pbpa_saliency_threshold_percentile: 90
+  diagnostic_part_threshold: "adaptive"

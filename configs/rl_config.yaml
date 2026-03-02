@@ -1,0 +1,31 @@
+environments:
+  - name: "MiniGrid-DoorKey-8x8-v0"
+    train_timesteps: 2000000
+  - name: "MiniGrid-KeyCorridorS4R3-v0"
+    train_timesteps: 5000000
+  - name: "MiniGrid-MultiRoom-N6-v0"
+    train_timesteps: 5000000
+
+agent:
+  algorithm: "PPO"
+  lr: 0.0003
+  clip_range: 0.2
+  gae_lambda: 0.95
+  ent_coef: 0.01
+  n_steps: 128
+  batch_size: 64
+  n_epochs: 4
+
+goal_conditioned:
+  embedding_dim: 32
+  her_relabel_ratio: 0.8
+  negative_reward: -0.1
+  train_timesteps: 1000000
+
+evaluation:
+  n_eval_trajectories: 500
+  boundary_tolerance: 2
+  counterfactual_n_samples: 100
+  counterfactual_horizon: 20
+  predictability_horizon: 5
+  predictability_mlp_hidden: [64, 64]
