@@ -109,22 +109,36 @@ def _get_saliency_map(
     """
     if method_name == "purposive":
         competitors = confusion_cache.get(class_idx, [])
+        if not competitors:
+            return np.zeros((448, 448), dtype=np.float32), []
+
+        # Equal weights for each competitor
+        weights = {j: 1.0 / len(competitors) for j in competitors}
+
+        # PurposiveSaliency.compute() returns (per_competitor_maps, s_agg, annotation_map)
+        per_comp_maps_raw, s_agg_raw, _ = purposive_saliency.compute(
+            x, class_idx, competitors, weights
+        )
+
+        # s_agg: Tensor (H, W) — the aggregated map
+        if isinstance(s_agg_raw, torch.Tensor):
+            agg_map = s_agg_raw.detach().cpu().float().numpy()
+        else:
+            agg_map = np.asarray(s_agg_raw, dtype=np.float32)
+
+        # per_competitor_maps: dict {class_idx: Tensor (H, W)}
         per_comp_maps: List[np.ndarray] = []
-        agg_map = np.zeros((448, 448), dtype=np.float32)
-
-        for comp in competitors:
-            m = purposive_saliency.compute(x, class_idx, comp)
+        for j in competitors:
+            m = per_comp_maps_raw.get(j) if isinstance(per_comp_maps_raw, dict) else None
+            if m is None:
+                continue
             if isinstance(m, torch.Tensor):
-                m = m.detach().cpu().numpy()
-            m = m.astype(np.float32)
-            if m.ndim == 1:
-                side = int(np.sqrt(m.shape[0]))
-                m = m.reshape(side, side)
+                m = m.detach().cpu().float().numpy()
+            m = np.asarray(m, dtype=np.float32)
+            if m.ndim != 2:
+                m = m.reshape(448, 448) if m.size == 448 * 448 else m.squeeze()
             per_comp_maps.append(m)
-            agg_map += m
 
-        if per_comp_maps:
-            agg_map /= len(per_comp_maps)
         return agg_map, per_comp_maps
 
     elif method_name == "ig":

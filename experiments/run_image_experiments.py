@@ -314,6 +314,62 @@ def _load_class_attribute_matrix(data_dir: str, n_classes: int) -> np.ndarray:
     return np.zeros((n_classes, 312), dtype=np.float32)
 
 
+def _build_attr_part_labels(data_dir: str) -> Optional[List[str]]:
+    """
+    Build a list of length 312 mapping each CUB attribute index to a
+    canonical part name (matching PART_TO_ATTR values in metrics.py).
+
+    Reads attributes/attributes.txt whose lines look like:
+        1 has_bill_shape::curved_(up_or_down)
+        2 has_wing_color::blue
+        ...
+    """
+    attrs_file = os.path.join(data_dir, "attributes", "attributes.txt")
+    if not os.path.exists(attrs_file):
+        logger.warning("attributes/attributes.txt not found; PBPA will be skipped.")
+        return None
+
+    # keyword substring -> canonical part name
+    keyword_to_part = [
+        ("bill",        "beak"),
+        ("beak",        "beak"),
+        ("crown",       "crown"),
+        ("forehead",    "crown"),
+        ("nape",        "crown"),
+        ("left_eye",    "left_eye"),
+        ("right_eye",   "right_eye"),
+        ("eye",         "left_eye"),
+        ("throat",      "throat"),
+        ("breast",      "breast"),
+        ("belly",       "belly"),
+        ("back",        "back"),
+        ("upperparts",  "back"),
+        ("left_wing",   "left_wing"),
+        ("right_wing",  "right_wing"),
+        ("wing",        "left_wing"),
+        ("tail",        "tail"),
+        ("left_leg",    "left_leg"),
+        ("right_leg",   "right_leg"),
+        ("leg",         "left_leg"),
+    ]
+
+    labels: List[str] = []
+    with open(attrs_file) as f:
+        for line in f:
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) < 2:
+                labels.append("back")
+                continue
+            attr_name = parts[1].lower().replace("::", "_")
+            assigned = "back"  # default
+            for kw, part in keyword_to_part:
+                if kw in attr_name:
+                    assigned = part
+                    break
+            labels.append(assigned)
+    return labels
+
+
 def _load_class_names(data_dir: str) -> List[str]:
     names_file = os.path.join(data_dir, "classes.txt")
     if not os.path.exists(names_file):
@@ -351,36 +407,59 @@ def _load_model(checkpoint_path: str, n_classes: int, device: torch.device) -> n
 
 
 # ---------------------------------------------------------------------------
-# Stub purposive saliency (real implementation lives in methods/teleological/)
+# Purposive saliency wrapper
 # ---------------------------------------------------------------------------
 
-class _PurposiveSaliencyStub:
+class _PurposiveSaliencyWrapper:
     """
-    Thin wrapper: tries to import the real PurposiveSaliency; falls back to
-    IG-based attribution if the module is not yet implemented.
+    Wraps the real PurposiveSaliency so image_eval.py can call
+    .compute(x, true_class, confusion_set, weights) directly.
+
+    Falls back to IGExplainer if PurposiveSaliency is unavailable, exposing
+    the same interface (returns a trivial single-map result).
     """
 
     def __init__(self, model: nn.Module, device: torch.device) -> None:
-        self._model = model
         self._device = device
         try:
             from methods.teleological.purposive_saliency import PurposiveSaliency  # type: ignore
             self._impl = PurposiveSaliency(model, device=str(device))
+            self._is_real = True
             logger.info("Using real PurposiveSaliency implementation.")
         except ImportError:
             from methods.baselines.integrated_gradients import IGExplainer
             self._impl = IGExplainer(model, device=str(device))
+            self._is_real = False
             logger.warning(
                 "PurposiveSaliency not found; falling back to IGExplainer for purposive slot."
             )
 
     def compute(
-        self, x: torch.Tensor, class_i: int, class_j: int
-    ) -> np.ndarray:
-        if hasattr(self._impl, "compute_purposive"):
-            return self._impl.compute_purposive(x, class_i, class_j)
-        # Fallback: IG toward class_i
-        return self._impl.compute(x, class_i)
+        self,
+        x: torch.Tensor,
+        true_class: int,
+        confusion_set: List[int],
+        weights: Dict[int, float],
+        n_steps: int = 50,
+    ):
+        """
+        Returns (per_competitor_maps, s_agg, annotation_map) matching
+        the real PurposiveSaliency.compute() interface.
+        """
+        if self._is_real:
+            return self._impl.compute(x, true_class, confusion_set, weights, n_steps=n_steps)
+
+        # Fallback: IG toward true_class, broadcast as a single-competitor result
+        ig_map = self._impl.compute(x, true_class)
+        if isinstance(ig_map, torch.Tensor):
+            ig_map = ig_map.detach().cpu().numpy()
+        ig_map = np.abs(ig_map.astype(np.float32))
+        # Wrap in the expected return format
+        import torch as _torch
+        s_agg = _torch.from_numpy(ig_map)
+        per_competitor_maps = {j: s_agg.clone() for j in confusion_set}
+        annotation_map = _torch.zeros(ig_map.shape, dtype=_torch.long)
+        return per_competitor_maps, s_agg, annotation_map
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +559,7 @@ def main() -> None:
     # ---- Explainers -------------------------------------------------------
     logger.info("Initialising explainability methods...")
 
-    purposive_saliency = _PurposiveSaliencyStub(model, device)
+    purposive_saliency = _PurposiveSaliencyWrapper(model, device)
     ig_explainer = IGExplainer(model, device=str(device))
     gradcam_explainer = GradCAMExplainer(model, device=str(device))
 
@@ -496,7 +575,7 @@ def main() -> None:
     # Means-end decomposition (optional)
     means_end_decomp = None
     try:
-        from methods.teleological.means_end import MeansEndDecomposition  # type: ignore
+        from methods.teleological.means_end_decomposition import MeansEndDecomposition  # type: ignore
         means_end_decomp = MeansEndDecomposition(model, device=str(device))
         logger.info("MeansEndDecomposition loaded.")
     except ImportError:
@@ -509,6 +588,7 @@ def main() -> None:
     attribute_annotations = _load_attribute_annotations(data_dir)
     class_attribute_matrix = _load_class_attribute_matrix(data_dir, n_classes)
     class_names = _load_class_names(data_dir)
+    attr_part_labels = _build_attr_part_labels(data_dir)
     part_names = [
         "back", "beak", "belly", "breast", "crown", "forehead",
         "left_eye", "left_leg", "left_wing", "nape",
@@ -534,6 +614,7 @@ def main() -> None:
         config=config,
         device=device,
         results_dir=args.results_dir,
+        attr_part_labels=attr_part_labels,
     )
 
     # ---- Print summary ----------------------------------------------------
